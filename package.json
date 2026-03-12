@@ -1,0 +1,429 @@
+{
+  "name": "llm-context-copy",
+  "displayName": "LLM Context Copy",
+  "description": "Smart context copying tool for LLMs with custom file tree UI. Select files with checkboxes and copy to clipboard with token optimization.",
+  "version": "0.0.1",
+  "publisher": "bitfarer",
+  "engines": {
+    "vscode": "^1.96.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/username/llm-context-copy.git"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "llm-context-copy.openFileTree",
+        "title": "Open Context Copy",
+        "icon": "media/icon.png"
+      },
+      {
+        "command": "llm-context-copy.toggleItem",
+        "title": "Toggle Selection",
+        "icon": "$(check)"
+      },
+      {
+        "command": "llm-context-copy.copySelected",
+        "title": "Copy Selected Files",
+        "icon": "$(clippy)",
+        "category": "LLM Context Copy"
+      },
+      {
+        "command": "llm-context-copy.selectAll",
+        "title": "Select All Files",
+        "icon": "$(check-all)",
+        "category": "LLM Context Copy"
+      },
+      {
+        "command": "llm-context-copy.deselectAll",
+        "title": "Clear Selection",
+        "icon": "$(clear-all)",
+        "category": "LLM Context Copy"
+      },
+      {
+        "command": "llm-context-copy.refresh",
+        "title": "Refresh File Tree",
+        "icon": "$(refresh)",
+        "category": "LLM Context Copy"
+      },
+      {
+        "command": "llm-context-copy.openSettings",
+        "title": "Settings",
+        "icon": "$(gear)",
+        "category": "LLM Context Copy"
+      },
+      {
+        "command": "llm-context-copy.showPreview",
+        "title": "Preview Context",
+        "icon": "$(eye)",
+        "category": "LLM Context Copy"
+      },
+      {
+        "command": "llm-context-copy.copyIncremental",
+        "title": "Copy Incremental Changes",
+        "icon": "$(diff)",
+        "category": "LLM Context Copy"
+      },
+      {
+        "command": "llm-context-copy.applyTokenBudget",
+        "title": "Apply Token Budget",
+        "icon": "$(budget)",
+        "category": "LLM Context Copy"
+      },
+      {
+        "command": "llm-context-copy.switchWorkspace",
+        "title": "Switch Workspace",
+        "icon": "$(folder)",
+        "category": "LLM Context Copy"
+      },
+      {
+        "command": "llm-context-copy.suggestRelated",
+        "title": "Suggest Related Files",
+        "icon": "$(link)",
+        "category": "LLM Context Copy"
+      },
+      {
+        "command": "llm-context-copy.applySemanticCompression",
+        "title": "Apply Semantic Compression",
+        "icon": "$(compress)",
+        "category": "LLM Context Copy"
+      },
+      {
+        "command": "llm-context-copy.autoSortFiles",
+        "title": "Auto Sort Files",
+        "icon": "$(sort)",
+        "category": "LLM Context Copy"
+      },
+      {
+        "command": "llm-context-copy.suggestRelevant",
+        "title": "Suggest Relevant Files",
+        "icon": "$(lightbulb)",
+        "category": "LLM Context Copy"
+      },
+      {
+        "command": "llm-context-copy.switchTokenizer",
+        "title": "Switch Tokenizer Model",
+        "icon": "$(hash)",
+        "category": "LLM Context Copy"
+      },
+      {
+        "command": "llm-context-copy.clearCache",
+        "title": "Clear Cache",
+        "icon": "$(clear-all)",
+        "category": "LLM Context Copy"
+      },
+      {
+        "command": "llm-context-copy.stats.format",
+        "title": "Select Output Format",
+        "icon": "$(file-code)",
+        "category": "LLM Context Copy"
+      },
+      {
+        "command": "llm-context-copy.stats.strategies",
+        "title": "Select Compression Strategies",
+        "icon": "$(settings-gear)",
+        "category": "LLM Context Copy"
+      },
+      {
+        "command": "llm-context-copy.stats.toggleStrategy",
+        "title": "Toggle Strategy",
+        "category": "LLM Context Copy"
+      },
+      {
+        "command": "llm-context-copy.stats.setFormat",
+        "title": "Set Output Format",
+        "category": "LLM Context Copy"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "llm-context-copy",
+          "title": "LLM Context Copy",
+          "icon": "media/icon.png"
+        }
+      ]
+    },
+    "views": {
+      "llm-context-copy": [
+        {
+          "id": "llm-context-copy.tree",
+          "name": "Select Files",
+          "when": "workbenchState != empty",
+          "icon": "media/icon.png"
+        },
+        {
+          "id": "llm-context-copy.stats",
+          "name": "Statistics",
+          "when": "workbenchState != empty",
+          "icon": "media/icon.png"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "llm-context-copy.stats",
+        "contents": "📊 No Selection\n\nSelect files from the tree view above to see statistics.\n\n[$(check-all) Select All Files](command:llm-context-copy.selectAll)",
+        "when": "workbenchState != empty && llmContextCopy:selectedCount == 0"
+      },
+      {
+        "view": "llm-context-copy.tree",
+        "contents": "Select files from your workspace to copy context to clipboard.\n\n[$(check-all) Select All](command:llm-context-copy.selectAll)\n[$(clippy) Copy Selected](command:llm-context-copy.copySelected)\n[$(gear) Settings](command:llm-context-copy.openSettings)",
+        "when": "workbenchState != empty"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "llm-context-copy.toggleItem",
+          "when": "false"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "llm-context-copy.copySelected",
+          "when": "view == llm-context-copy.tree",
+          "group": "1_actions@1"
+        },
+        {
+          "command": "llm-context-copy.selectAll",
+          "when": "view == llm-context-copy.tree",
+          "group": "2_selection@1"
+        },
+        {
+          "command": "llm-context-copy.deselectAll",
+          "when": "view == llm-context-copy.tree",
+          "group": "2_selection@2"
+        },
+        {
+          "command": "llm-context-copy.refresh",
+          "when": "view == llm-context-copy.tree",
+          "group": "3_actions@1"
+        },
+        {
+          "command": "llm-context-copy.showPreview",
+          "when": "view == llm-context-copy.tree",
+          "group": "1_actions@2"
+        },
+        {
+          "command": "llm-context-copy.copyIncremental",
+          "when": "view == llm-context-copy.tree",
+          "group": "1_actions@3"
+        },
+        {
+          "command": "llm-context-copy.applyTokenBudget",
+          "when": "view == llm-context-copy.tree",
+          "group": "1_actions@4"
+        },
+        {
+          "command": "llm-context-copy.stats.format",
+          "when": "view == llm-context-copy.stats && viewItem == format",
+          "group": "1_stats@1"
+        },
+        {
+          "command": "llm-context-copy.stats.strategies",
+          "when": "view == llm-context-copy.stats && viewItem == strategies",
+          "group": "1_stats@2"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "llm-context-copy.copySelected",
+          "when": "view == llm-context-copy.tree",
+          "group": "navigation@1"
+        },
+        {
+          "command": "llm-context-copy.selectAll",
+          "when": "view == llm-context-copy.tree",
+          "group": "navigation@2"
+        },
+        {
+          "command": "llm-context-copy.deselectAll",
+          "when": "view == llm-context-copy.tree",
+          "group": "navigation@3"
+        },
+        {
+          "command": "llm-context-copy.refresh",
+          "when": "view == llm-context-copy.tree",
+          "group": "navigation@4"
+        },
+        {
+          "command": "llm-context-copy.openSettings",
+          "when": "view == llm-context-copy.tree",
+          "group": "navigation@5"
+        },
+        {
+          "command": "llm-context-copy.showPreview",
+          "when": "view == llm-context-copy.tree",
+          "group": "navigation@6"
+        },
+        {
+          "command": "llm-context-copy.switchWorkspace",
+          "when": "view == llm-context-copy.tree",
+          "group": "navigation@7"
+        },
+        {
+          "command": "llm-context-copy.suggestRelated",
+          "when": "view == llm-context-copy.tree",
+          "group": "1_actions@5"
+        },
+        {
+          "command": "llm-context-copy.applySemanticCompression",
+          "when": "view == llm-context-copy.tree",
+          "group": "1_actions@6"
+        },
+        {
+          "command": "llm-context-copy.autoSortFiles",
+          "when": "view == llm-context-copy.tree",
+          "group": "1_actions@7"
+        },
+        {
+          "command": "llm-context-copy.suggestRelevant",
+          "when": "view == llm-context-copy.tree",
+          "group": "1_actions@8"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "LLM Context Copy",
+      "properties": {
+        "llm-context-copy.excludePatterns": {
+          "type": "array",
+          "default": [
+            "**/node_modules/**",
+            "**/dist/**",
+            "**/build/**",
+            "**/.git/**",
+            "**/coverage/**",
+            "**/*.min.js",
+            "**/*.min.css",
+            "**/package-lock.json",
+            "**/pnpm-lock.yaml",
+            "**/yarn.lock",
+            "**/.DS_Store"
+          ],
+          "description": "Glob patterns for files to exclude.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "llm-context-copy.maxFileSize": {
+          "type": "number",
+          "default": 2097152,
+          "description": "Maximum file size in bytes to include (default: 2MB)."
+        },
+        "llm-context-copy.maxDepth": {
+          "type": "number",
+          "default": 10,
+          "description": "Maximum directory depth to traverse."
+        },
+        "llm-context-copy.suggestWeights.activeEditor": {
+          "type": "number",
+          "default": 30,
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Weight for active editor file in relevance scoring."
+        },
+        "llm-context-copy.suggestWeights.recentFiles": {
+          "type": "number",
+          "default": 20,
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Weight for recently opened files in relevance scoring."
+        },
+        "llm-context-copy.suggestWeights.dependencies": {
+          "type": "number",
+          "default": 25,
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Weight for dependency relationships in relevance scoring."
+        },
+        "llm-context-copy.suggestWeights.fileType": {
+          "type": "number",
+          "default": 15,
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Weight for file type priority in relevance scoring."
+        },
+        "llm-context-copy.suggestWeights.pathSimilarity": {
+          "type": "number",
+          "default": 10,
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Weight for path similarity in relevance scoring."
+        },
+        "llm-context-copy.suggestWeights.imports": {
+          "type": "number",
+          "default": 15,
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Weight for import relationships in relevance scoring."
+        },
+        "llm-context-copy.suggestMaxFiles": {
+          "type": "number",
+          "default": 15,
+          "minimum": 1,
+          "maximum": 50,
+          "description": "Maximum number of files to suggest in 'Suggest Relevant Files'."
+        },
+        "llm-context-copy.analyzeFileExtensions": {
+          "type": "array",
+          "default": [
+            ".ts",
+            ".tsx",
+            ".js",
+            ".jsx",
+            ".py",
+            ".java",
+            ".go",
+            ".rs"
+          ],
+          "description": "File extensions to analyze for dependency relationships.",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "pnpm run compile",
+    "compile": "pnpm run check-types && pnpm run lint && node esbuild.js",
+    "watch": "npm-run-all -p watch:*",
+    "watch:esbuild": "node esbuild.js --watch",
+    "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
+    "package": "pnpm run compile && pnpm exec vsce package --no-dependencies && pnpm exec vsce ls",
+    "package:vsix": "vsce package --no-dependencies",
+    "compile-tests": "tsc -p . --outDir out",
+    "watch-tests": "tsc -p . -w --outDir out",
+    "pretest": "pnpm run compile-tests && pnpm run compile && pnpm run lint",
+    "check-types": "tsc --noEmit",
+    "lint": "eslint src",
+    "test": "vscode-test"
+  },
+  "devDependencies": {
+    "@toon-format/spec": "^3.0.1",
+    "@toon-format/toon": "^2.1.0",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "22.x",
+    "@types/vscode": "^1.96.0",
+    "@vscode/test-cli": "^0.0.12",
+    "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "^3.7.1",
+    "esbuild": "^0.27.2",
+    "eslint": "^9.39.2",
+    "npm-run-all": "^4.1.5",
+    "sharp": "^0.34.5",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.54.0"
+  }
+}
