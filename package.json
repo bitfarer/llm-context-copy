@@ -2,7 +2,7 @@
   "name": "llm-context-copy",
   "displayName": "LLM Context Copy",
   "description": "Smart context copying tool for LLMs with custom file tree UI. Select files with checkboxes and copy to clipboard with token optimization.",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "publisher": "bitfarer",
   "engines": {
     "vscode": "^1.96.0"

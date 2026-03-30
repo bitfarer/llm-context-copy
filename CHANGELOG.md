@@ -12,6 +12,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Custom exclusion rule templates
 - Batch operation history records
 
+## [0.0.2] - 2025-03-30
+
+### Added
+- Binary file detection for 40+ file types (images, fonts, archives, executables, databases, documents, media files)
+- Graceful handling of binary files with path-only references
+- User-friendly notification when binary files are included in selection
+- Binary file category display (Image, Font, Archive, Executable, etc.)
+
+### Fixed
+- PNG and other binary files no longer cause UTF-8 decode errors
+- Binary files are properly displayed in all output formats (Markdown, JSON, Plain, TOON)
+
 ## [0.0.1] - 2025-02-13
 
 ### Added
