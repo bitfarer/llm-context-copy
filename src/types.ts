@@ -9,6 +9,8 @@ export interface FileContext {
     size: number;
     isDirectory: boolean;
   };
+  isBinary?: boolean;
+  binaryCategory?: string;
 }
 
 export interface ProjectContext {

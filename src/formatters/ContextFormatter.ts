@@ -63,6 +63,17 @@ export class ContextFormatter {
 
     lines.push(`## File: ${relativePath}`);
     lines.push('');
+
+    if (file.isBinary) {
+      lines.push(`> **${file.binaryCategory || 'Binary'} File** (content not included)`);
+      lines.push(`> Path: \`${relativePath}\``);
+      lines.push(`> Size: ${this.formatSize(file.stats.size)}`);
+      lines.push('');
+      lines.push('*This is a binary file. Only the file path and metadata are provided for reference.*');
+      lines.push('');
+      return lines.join('\n');
+    }
+
     lines.push(`\`\`\`${file.language}`);
 
     let content = file.content;
@@ -167,8 +178,14 @@ export class ContextFormatter {
     for (const file of context.files) {
       lines.push(`File: ${file.relativePath}`);
       lines.push('='.repeat(60));
-      lines.push(file.content);
-      lines.push('');
+      if (file.isBinary) {
+        lines.push(`[${file.binaryCategory || 'Binary'} File - content not included]`);
+        lines.push(`Size: ${this.formatSize(file.stats.size)}`);
+        lines.push('');
+      } else {
+        lines.push(file.content);
+        lines.push('');
+      }
     }
 
     return lines.join('\n');
@@ -227,6 +244,16 @@ export class ContextFormatter {
       }
 
       toonData.files = context.files.map((file) => {
+        if (file.isBinary) {
+          return {
+            path: file.relativePath.replace(/\\/g, '/'),
+            language: file.language,
+            size: file.stats.size,
+            isBinary: true,
+            binaryCategory: file.binaryCategory || 'Binary',
+            content: null,
+          };
+        }
         let content = file.content;
         if (this.options.collapseEmptyLines) {
           content = content.replace(/\n\s*\n\s*\n+/g, '\n\n');
@@ -270,6 +297,13 @@ export class ContextFormatter {
 
     const maxContentPreview = 200;
     for (const file of context.files) {
+      const safePath = file.relativePath.replace(/\\/g, '/');
+
+      if (file.isBinary) {
+        lines.push(`  "${safePath}\t${file.binaryCategory || 'Binary'}\t${file.stats.size}\t[BINARY - content not included]"`);
+        continue;
+      }
+
       let content = file.content;
       if (this.options.collapseEmptyLines) {
         content = content.replace(/\n\s*\n\s*\n+/g, '\n\n');
@@ -279,7 +313,6 @@ export class ContextFormatter {
         ? content.substring(0, maxContentPreview) + '... (truncated)'
         : content;
 
-      const safePath = file.relativePath.replace(/\\/g, '/');
       lines.push(`  "${safePath}\t${file.language}\t${file.stats.size}\t${safeContent.replace(/\n/g, '\\n').replace(/\t/g, '\\t')}"`);
     }
 

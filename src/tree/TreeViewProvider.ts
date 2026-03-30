@@ -10,6 +10,7 @@ import { PreviewPanel } from '../preview/PreviewPanel';
 import { VirtualizedTreeProvider } from '../performance/VirtualizedTree';
 import { TreeItemData, ProjectContext, FormatterOptions, SessionMemoryEntry, FileContext } from '../types';
 import { CompressionEngine } from '../compression/CompressionEngine';
+import { isBinaryFile, getBinaryFileCategory } from '../utils/FileUtils';
 
 const LANGUAGE_MAP: Record<string, string> = {
   '.js': 'javascript',
@@ -387,14 +388,28 @@ export class TreeViewProvider implements vscode.TreeDataProvider<FileTreeItem> {
         for (const relPath of filePaths) {
           const fullPath = path.join(root, relPath);
           try {
-            const content = await fs.readFile(fullPath, 'utf-8');
-            filesToCompress.push({
-              path: fullPath,
-              content,
-              language: detectLanguage(fullPath),
-              relativePath: relPath,
-              stats: { size: Buffer.byteLength(content, 'utf-8'), isDirectory: false },
-            });
+            const stat = await fs.stat(fullPath);
+            if (isBinaryFile(fullPath)) {
+              const category = getBinaryFileCategory(fullPath);
+              filesToCompress.push({
+                path: fullPath,
+                content: `[Binary file - content not included]`,
+                language: 'plaintext',
+                relativePath: relPath,
+                stats: { size: stat.size, isDirectory: false },
+                isBinary: true,
+                binaryCategory: category,
+              });
+            } else {
+              const content = await fs.readFile(fullPath, 'utf-8');
+              filesToCompress.push({
+                path: fullPath,
+                content,
+                language: detectLanguage(fullPath),
+                relativePath: relPath,
+                stats: { size: Buffer.byteLength(content, 'utf-8'), isDirectory: false },
+              });
+            }
           } catch {
             // Skip unreadable files
           }
@@ -562,20 +577,35 @@ export class TreeViewProvider implements vscode.TreeDataProvider<FileTreeItem> {
 
     const filesToCopy: any[] = [];
     const directoriesSkipped: string[] = [];
+    const binaryFilesInfo: { path: string; category: string; size: number }[] = [];
 
     for (const relPath of this.checkedItems) {
       const fullPath = path.join(root, relPath);
       try {
         const stat = await fs.stat(fullPath);
         if (stat.isFile()) {
-          const content = await fs.readFile(fullPath, 'utf-8');
-          filesToCopy.push({
-            path: fullPath,
-            content,
-            language: detectLanguage(fullPath),
-            relativePath: relPath,
-            stats: { size: stat.size, isDirectory: false },
-          });
+          if (isBinaryFile(fullPath)) {
+            const category = getBinaryFileCategory(fullPath);
+            binaryFilesInfo.push({ path: relPath, category, size: stat.size });
+            filesToCopy.push({
+              path: fullPath,
+              content: `[Binary file - content not included]`,
+              language: 'plaintext',
+              relativePath: relPath,
+              stats: { size: stat.size, isDirectory: false },
+              isBinary: true,
+              binaryCategory: category,
+            });
+          } else {
+            const content = await fs.readFile(fullPath, 'utf-8');
+            filesToCopy.push({
+              path: fullPath,
+              content,
+              language: detectLanguage(fullPath),
+              relativePath: relPath,
+              stats: { size: stat.size, isDirectory: false },
+            });
+          }
         } else if (stat.isDirectory()) {
           directoriesSkipped.push(relPath);
         }
@@ -609,6 +639,13 @@ export class TreeViewProvider implements vscode.TreeDataProvider<FileTreeItem> {
 
     const strategies = Array.from(this.contextManager.getActiveStrategies());
     await this.copyService.copyToClipboard(context, strategies);
+
+    if (binaryFilesInfo.length > 0) {
+      const binarySummary = binaryFilesInfo.map(f => `${f.path} (${f.category})`).join(', ');
+      vscode.window.showInformationMessage(
+        `✓ Copied ${filesToCopy.length} files. ${binaryFilesInfo.length} binary file(s) included as path reference only: ${binarySummary}`
+      );
+    }
 
     if (this.sessionMemory) {
       const sessionEntry: SessionMemoryEntry = {
@@ -689,14 +726,27 @@ export class TreeViewProvider implements vscode.TreeDataProvider<FileTreeItem> {
       try {
         const stat = await fs.stat(fullPath);
         if (stat.isFile()) {
-          const content = await fs.readFile(fullPath, 'utf-8');
-          filesToCopy.push({
-            path: fullPath,
-            content,
-            language: detectLanguage(fullPath),
-            relativePath: relPath,
-            stats: { size: stat.size, isDirectory: false },
-          });
+          if (isBinaryFile(fullPath)) {
+            const category = getBinaryFileCategory(fullPath);
+            filesToCopy.push({
+              path: fullPath,
+              content: `[Binary file - content not included]`,
+              language: 'plaintext',
+              relativePath: relPath,
+              stats: { size: stat.size, isDirectory: false },
+              isBinary: true,
+              binaryCategory: category,
+            });
+          } else {
+            const content = await fs.readFile(fullPath, 'utf-8');
+            filesToCopy.push({
+              path: fullPath,
+              content,
+              language: detectLanguage(fullPath),
+              relativePath: relPath,
+              stats: { size: stat.size, isDirectory: false },
+            });
+          }
         } else if (stat.isDirectory()) {
           directoriesSkipped.push(relPath);
         }
@@ -774,15 +824,30 @@ export class TreeViewProvider implements vscode.TreeDataProvider<FileTreeItem> {
 
     for (const filePath of allFiles) {
       try {
-        const content = await fs.readFile(filePath, 'utf-8');
+        const stat = await fs.stat(filePath);
         const relPath = path.relative(root, filePath).replace(/\\/g, '/');
-        filesWithContent.push({
-          path: filePath,
-          content,
-          language: detectLanguage(filePath),
-          relativePath: relPath,
-          stats: { size: Buffer.byteLength(content, 'utf-8'), isDirectory: false },
-        });
+        
+        if (isBinaryFile(filePath)) {
+          const category = getBinaryFileCategory(filePath);
+          filesWithContent.push({
+            path: filePath,
+            content: `[Binary file - content not included]`,
+            language: 'plaintext',
+            relativePath: relPath,
+            stats: { size: stat.size, isDirectory: false },
+            isBinary: true,
+            binaryCategory: category,
+          });
+        } else {
+          const content = await fs.readFile(filePath, 'utf-8');
+          filesWithContent.push({
+            path: filePath,
+            content,
+            language: detectLanguage(filePath),
+            relativePath: relPath,
+            stats: { size: Buffer.byteLength(content, 'utf-8'), isDirectory: false },
+          });
+        }
       } catch { /* skip */ }
     }
 
@@ -881,14 +946,27 @@ export class TreeViewProvider implements vscode.TreeDataProvider<FileTreeItem> {
       try {
         const stat = await fs.stat(fullPath);
         if (stat.isFile()) {
-          const content = await fs.readFile(fullPath, 'utf-8');
-          filesToCopy.push({
-            path: fullPath,
-            content,
-            language: detectLanguage(fullPath),
-            relativePath: relPath,
-            stats: { size: stat.size, isDirectory: false },
-          });
+          if (isBinaryFile(fullPath)) {
+            const category = getBinaryFileCategory(fullPath);
+            filesToCopy.push({
+              path: fullPath,
+              content: `[Binary file - content not included]`,
+              language: 'plaintext',
+              relativePath: relPath,
+              stats: { size: stat.size, isDirectory: false },
+              isBinary: true,
+              binaryCategory: category,
+            });
+          } else {
+            const content = await fs.readFile(fullPath, 'utf-8');
+            filesToCopy.push({
+              path: fullPath,
+              content,
+              language: detectLanguage(fullPath),
+              relativePath: relPath,
+              stats: { size: stat.size, isDirectory: false },
+            });
+          }
         }
       } catch { /* skip */ }
     }
@@ -921,15 +999,30 @@ export class TreeViewProvider implements vscode.TreeDataProvider<FileTreeItem> {
 
     for (const filePath of allFiles) {
       try {
-        const content = await fs.readFile(filePath, 'utf-8');
+        const stat = await fs.stat(filePath);
         const relPath = path.relative(root, filePath).replace(/\\/g, '/');
-        filesWithContent.push({
-          path: filePath,
-          content,
-          language: detectLanguage(filePath),
-          relativePath: relPath,
-          stats: { size: Buffer.byteLength(content, 'utf-8'), isDirectory: false },
-        });
+        
+        if (isBinaryFile(filePath)) {
+          const category = getBinaryFileCategory(filePath);
+          filesWithContent.push({
+            path: filePath,
+            content: `[Binary file - content not included]`,
+            language: 'plaintext',
+            relativePath: relPath,
+            stats: { size: stat.size, isDirectory: false },
+            isBinary: true,
+            binaryCategory: category,
+          });
+        } else {
+          const content = await fs.readFile(filePath, 'utf-8');
+          filesWithContent.push({
+            path: filePath,
+            content,
+            language: detectLanguage(filePath),
+            relativePath: relPath,
+            stats: { size: Buffer.byteLength(content, 'utf-8'), isDirectory: false },
+          });
+        }
       } catch { /* skip */ }
     }
 
@@ -973,15 +1066,30 @@ export class TreeViewProvider implements vscode.TreeDataProvider<FileTreeItem> {
 
     for (const filePath of allFiles) {
       try {
-        const content = await fs.readFile(filePath, 'utf-8');
+        const stat = await fs.stat(filePath);
         const relPath = path.relative(root, filePath).replace(/\\/g, '/');
-        filesWithContent.push({
-          path: filePath,
-          content,
-          language: detectLanguage(filePath),
-          relativePath: relPath,
-          stats: { size: Buffer.byteLength(content, 'utf-8'), isDirectory: false },
-        });
+        
+        if (isBinaryFile(filePath)) {
+          const category = getBinaryFileCategory(filePath);
+          filesWithContent.push({
+            path: filePath,
+            content: `[Binary file - content not included]`,
+            language: 'plaintext',
+            relativePath: relPath,
+            stats: { size: stat.size, isDirectory: false },
+            isBinary: true,
+            binaryCategory: category,
+          });
+        } else {
+          const content = await fs.readFile(filePath, 'utf-8');
+          filesWithContent.push({
+            path: filePath,
+            content,
+            language: detectLanguage(filePath),
+            relativePath: relPath,
+            stats: { size: Buffer.byteLength(content, 'utf-8'), isDirectory: false },
+          });
+        }
       } catch { /* skip */ }
     }
 
