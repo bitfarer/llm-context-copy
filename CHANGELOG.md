@@ -12,6 +12,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Custom exclusion rule templates
 - Batch operation history records
 
+## [0.0.3] - 2025-04-01
+
+### Added
+- `IgnoreMatcher` utility for parsing `.gitignore` patterns and custom exclusion rules
+- `maxTotalSize` configuration option to limit total readable text size (default: 8MB)
+- `estimateTokensFromBytes()` method for token estimation from byte length
+- Warning notifications for oversized files and total size limit exceeded
+
+### Changed
+- Refactored file collection logic with centralized `collectFileContexts()` method
+- Improved binary file detection in token counting (returns 0 tokens)
+- Enhanced `.gitignore` pattern support with proper glob matching
+- Better handling of large files exceeding `maxFileSize` limit
+
+### Fixed
+- File tree item description no longer shows "0" for zero-size files
+- Proper exclusion of hidden files while preserving `.gitignore` access
+
 ## [0.0.2] - 2025-03-30
 
 ### Added

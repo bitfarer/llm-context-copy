@@ -34,6 +34,12 @@ suite('TokenCounter Tests', () => {
     assert.strictEqual(tokens, 9);
   });
 
+  test('should estimate tokens from byte length', () => {
+    const counter = new TokenCounter(4);
+    assert.strictEqual(counter.estimateTokensFromBytes(0), 0);
+    assert.strictEqual(counter.estimateTokensFromBytes(9), 3);
+  });
+
   test('should count project tokens', () => {
     const counter = new TokenCounter(4);
     const context: ProjectContext = {

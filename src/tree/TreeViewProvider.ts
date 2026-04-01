@@ -11,6 +11,7 @@ import { VirtualizedTreeProvider } from '../performance/VirtualizedTree';
 import { TreeItemData, ProjectContext, FormatterOptions, SessionMemoryEntry, FileContext } from '../types';
 import { CompressionEngine } from '../compression/CompressionEngine';
 import { isBinaryFile, getBinaryFileCategory } from '../utils/FileUtils';
+import { IgnoreMatcher } from '../utils/IgnoreMatcher';
 
 const LANGUAGE_MAP: Record<string, string> = {
   '.js': 'javascript',
@@ -53,6 +54,19 @@ function detectLanguage(filePath: string): string {
   return LANGUAGE_MAP[ext] || 'plaintext';
 }
 
+interface ContentCollectionOptions {
+  enforceTotalSize: boolean;
+  totalSizeLimit: number;
+}
+
+interface CollectedContextResult {
+  context: ProjectContext | null;
+  binaryFilesInfo: { path: string; category: string; size: number }[];
+  directoriesSkipped: string[];
+  oversizedFiles: { path: string; size: number }[];
+  skippedByTotalLimit: { path: string; size: number }[];
+}
+
 export class TreeViewProvider implements vscode.TreeDataProvider<FileTreeItem> {
   private _onDidChangeTreeData = new vscode.EventEmitter<FileTreeItem | undefined | void>();
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
@@ -61,7 +75,6 @@ export class TreeViewProvider implements vscode.TreeDataProvider<FileTreeItem> {
   readonly onDidChangeSelection = this._onDidChangeSelection.event;
 
   private checkedItems: Set<string> = new Set();
-  private gitignorePatterns: string[] = [];
   private copyService: CopyService;
   private workspaceManager?: WorkspaceManager;
   private sessionMemory?: SessionMemory;
@@ -70,6 +83,11 @@ export class TreeViewProvider implements vscode.TreeDataProvider<FileTreeItem> {
   private virtualizedTree?: VirtualizedTreeProvider;
   private isLoading = false;
   private loadingCancellationToken?: vscode.CancellationTokenSource;
+  private ignoreMatcher: IgnoreMatcher = IgnoreMatcher.empty();
+  private settingsReady: Promise<void> = Promise.resolve();
+  private maxFileSize = 2 * 1024 * 1024;
+  private maxTotalSize = 8 * 1024 * 1024;
+  private maxDepth = 10;
 
   constructor(
     private extensionContext: vscode.ExtensionContext,
@@ -82,7 +100,7 @@ export class TreeViewProvider implements vscode.TreeDataProvider<FileTreeItem> {
     this.workspaceManager = workspaceManager;
     this.sessionMemory = sessionMemory;
     this.tokenBudgetManager = tokenBudgetManager;
-    this.loadGitignorePatterns();
+    this.settingsReady = this.reloadRuntimeSettings();
     this.initializeVirtualizedTree();
 
     this.contextManager.onDidChange(() => {
@@ -95,7 +113,7 @@ export class TreeViewProvider implements vscode.TreeDataProvider<FileTreeItem> {
     if (root) {
       this.virtualizedTree = new VirtualizedTreeProvider(root, {
         chunkSize: 100,
-        maxDepth: 15,
+        maxDepth: this.maxDepth,
         batchDelay: 5,
       });
     }
@@ -116,6 +134,8 @@ export class TreeViewProvider implements vscode.TreeDataProvider<FileTreeItem> {
 
   refresh(): void {
     this.copyService = this.createCopyService();
+    this.settingsReady = this.reloadRuntimeSettings();
+    this.selectionCache.clear();
     this.virtualizedTree?.invalidateTree();
     this.initializeVirtualizedTree();
     this.loadingCancellationToken?.cancel();
@@ -123,22 +143,20 @@ export class TreeViewProvider implements vscode.TreeDataProvider<FileTreeItem> {
     this._onDidChangeTreeData.fire();
   }
 
-  private async loadGitignorePatterns(): Promise<void> {
+  private async reloadRuntimeSettings(): Promise<void> {
     const root = this.contextManager.getWorkspaceRoot();
-    if (!root) {
-      this.gitignorePatterns = [];
-      return;
-    }
-    try {
-      const gitignorePath = path.join(root, '.gitignore');
-      const content = await fs.readFile(gitignorePath, 'utf-8');
-      this.gitignorePatterns = content
-        .split('\n')
-        .map(line => line.trim())
-        .filter(line => line.length > 0 && !line.startsWith('#'));
-    } catch {
-      this.gitignorePatterns = [];
-    }
+    const config = vscode.workspace.getConfiguration('llm-context-copy');
+
+    this.maxFileSize = Math.max(0, config.get<number>('maxFileSize', 2 * 1024 * 1024));
+    this.maxTotalSize = Math.max(this.maxFileSize, config.get<number>('maxTotalSize', 8 * 1024 * 1024));
+    this.maxDepth = Math.max(1, config.get<number>('maxDepth', 10));
+
+    const excludePatterns = config.get<string[]>('excludePatterns', []);
+    this.ignoreMatcher = await IgnoreMatcher.create(root, excludePatterns);
+  }
+
+  private async ensureSettingsLoaded(): Promise<void> {
+    await this.settingsReady;
   }
 
   getTreeItem(element: FileTreeItem): vscode.TreeItem {
@@ -146,6 +164,8 @@ export class TreeViewProvider implements vscode.TreeDataProvider<FileTreeItem> {
   }
 
   async getChildren(element?: FileTreeItem): Promise<FileTreeItem[]> {
+    await this.ensureSettingsLoaded();
+
     const root = this.contextManager.getWorkspaceRoot();
     if (!root) { return []; }
 
@@ -207,12 +227,14 @@ export class TreeViewProvider implements vscode.TreeDataProvider<FileTreeItem> {
         const fullPath = path.join(dirPath, entry.name);
         const relativePath = path.relative(root, fullPath).replace(/\\/g, '/');
 
-        if (this.shouldExclude(relativePath, entry.name)) {
+        if (this.shouldExclude(relativePath, entry.name, entry.isDirectory())) {
           return;
         }
 
         try {
-          const stats = await this.contextManager.getStatsForPath(relativePath, entry.isDirectory());
+          const stats = entry.isDirectory()
+            ? { size: 0, tokens: undefined }
+            : await this.contextManager.getStatsForPath(relativePath, false);
 
           const itemData: TreeItemData = {
             uri: vscode.Uri.file(fullPath),
@@ -253,20 +275,18 @@ export class TreeViewProvider implements vscode.TreeDataProvider<FileTreeItem> {
     const root = this.contextManager.getWorkspaceRoot();
     if (!root) { return []; }
 
-    const stats = await this.contextManager.getStatsForPath('.', true);
     const itemData: TreeItemData = {
       uri: vscode.Uri.file(root),
       relativePath: '.',
       name: path.basename(root),
       type: 'directory',
       size: 0,
-      tokenCount: stats.tokens,
     };
 
     const isChecked = this.isItemChecked('.', true);
 
     const rootItem = new FileTreeItem('.', itemData, isChecked, vscode.TreeItemCollapsibleState.Expanded);
-    rootItem.tooltip = `Project Root: ${root}\nTotal Raw Tokens: ${stats.tokens.toLocaleString()}\n(Actual copied tokens may be lower due to compression)`;
+    rootItem.tooltip = `Project Root: ${root}`;
 
     return [rootItem];
   }
@@ -289,6 +309,7 @@ export class TreeViewProvider implements vscode.TreeDataProvider<FileTreeItem> {
 
   async checkItem(itemId: string | undefined): Promise<void> {
     if (!itemId) { return; }
+    await this.ensureSettingsLoaded();
 
     const root = this.contextManager.getWorkspaceRoot();
     if (!root) { return; }
@@ -318,6 +339,7 @@ export class TreeViewProvider implements vscode.TreeDataProvider<FileTreeItem> {
 
   async uncheckItem(itemId: string | undefined): Promise<void> {
     if (!itemId) { return; }
+    await this.ensureSettingsLoaded();
 
     const root = this.contextManager.getWorkspaceRoot();
     if (!root) { return; }
@@ -384,49 +406,12 @@ export class TreeViewProvider implements vscode.TreeDataProvider<FileTreeItem> {
     let compressedTokens = totalRawTokens;
     if (files > 0 && root) {
       try {
-        const filesToCompress: FileContext[] = [];
-        for (const relPath of filePaths) {
-          const fullPath = path.join(root, relPath);
-          try {
-            const stat = await fs.stat(fullPath);
-            if (isBinaryFile(fullPath)) {
-              const category = getBinaryFileCategory(fullPath);
-              filesToCompress.push({
-                path: fullPath,
-                content: `[Binary file - content not included]`,
-                language: 'plaintext',
-                relativePath: relPath,
-                stats: { size: stat.size, isDirectory: false },
-                isBinary: true,
-                binaryCategory: category,
-              });
-            } else {
-              const content = await fs.readFile(fullPath, 'utf-8');
-              filesToCompress.push({
-                path: fullPath,
-                content,
-                language: detectLanguage(fullPath),
-                relativePath: relPath,
-                stats: { size: Buffer.byteLength(content, 'utf-8'), isDirectory: false },
-              });
-            }
-          } catch {
-            // Skip unreadable files
-          }
-        }
+        const filesToCompress = await this.collectAbsoluteFileContexts(
+          filePaths.map((filePath) => path.join(root, filePath))
+        );
 
         if (filesToCompress.length > 0) {
-          const context: ProjectContext = {
-            files: filesToCompress,
-            structure: null,
-            metadata: {
-              rootPath: root,
-              totalFiles: filesToCompress.length,
-              totalSize: filesToCompress.reduce((s, f) => s + f.stats.size, 0),
-              tokenCount: 0,
-              timestamp: Date.now(),
-            },
-          };
+          const context = this.createProjectContext(root, filesToCompress);
 
           const activeStrategies = Array.from(this.contextManager.getActiveStrategies());
           if (activeStrategies.length > 0) {
@@ -470,74 +455,19 @@ export class TreeViewProvider implements vscode.TreeDataProvider<FileTreeItem> {
     this._onDidChangeTreeData.fire();
   }
 
-  private shouldExclude(relativePath: string, fileName: string): boolean {
+  private shouldExclude(relativePath: string, fileName: string, isDirectory: boolean): boolean {
     // Always hide dot-files except .gitignore
     if (fileName.startsWith('.') && fileName !== '.gitignore') {
       return true;
     }
 
-    const config = vscode.workspace.getConfiguration('llm-context-copy');
-    const excludePatterns: string[] = config.get('excludePatterns') || [];
-
-    return this.matchesAnyPattern(relativePath, fileName, excludePatterns)
-      || this.matchesAnyPattern(relativePath, fileName, this.gitignorePatterns);
+    return this.ignoreMatcher.ignores(relativePath, isDirectory);
   }
 
-  private matchesAnyPattern(relativePath: string, fileName: string, patterns: string[]): boolean {
-    const normalizedPath = relativePath.replace(/\\/g, '/');
-
-    return patterns.some(pattern => {
-      const trimmed = pattern.trim();
-      if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('!')) {
-        return false;
-      }
-
-      const normalizedPattern = trimmed.replace(/\\/g, '/');
-
-      // Handle directory-only patterns (ending with /)
-      if (normalizedPattern.endsWith('/')) {
-        const dirName = normalizedPattern.replace(/\/+$/, '');
-        return normalizedPath === dirName
-          || normalizedPath.startsWith(dirName + '/')
-          || normalizedPath.includes('/' + dirName + '/')
-          || fileName === dirName;
-      }
-
-      // Handle glob patterns with **
-      if (normalizedPattern.includes('**')) {
-        const regexStr = normalizedPattern
-          .replace(/[.+^${}()|[\]\\]/g, '\\$&')  // escape regex special chars (except * and ?)
-          .replace(/\*\*/g, '§§')                  // temp placeholder for **
-          .replace(/\*/g, '[^/]*')                 // * matches anything except /
-          .replace(/§§/g, '.*')                    // ** matches anything including /
-          .replace(/\?/g, '[^/]');                 // ? matches single char except /
-        const regex = new RegExp('^' + regexStr + '$');
-        return regex.test(normalizedPath);
-      }
-
-      // Handle simple glob patterns with *
-      if (normalizedPattern.includes('*')) {
-        const regexStr = normalizedPattern
-          .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-          .replace(/\*/g, '[^/]*')
-          .replace(/\?/g, '[^/]');
-        const regex = new RegExp('^' + regexStr + '$');
-        return regex.test(normalizedPath) || regex.test(fileName);
-      }
-
-      // Simple name match
-      return normalizedPath === normalizedPattern
-        || fileName === normalizedPattern
-        || normalizedPath.includes('/' + normalizedPattern + '/')
-        || normalizedPath.startsWith(normalizedPattern + '/')
-        || normalizedPath.endsWith('/' + normalizedPattern);
-    });
-  }
-
-  private async getAllFilesRecursive(dirPath: string): Promise<string[]> {
+  private async getAllFilesRecursive(dirPath: string, depth = 0): Promise<string[]> {
     const files: string[] = [];
     const root = this.contextManager.getWorkspaceRoot();
-    if (!root) { return files; }
+    if (!root || depth > this.maxDepth) { return files; }
 
     try {
       const entries = await fs.readdir(dirPath, { withFileTypes: true });
@@ -545,12 +475,12 @@ export class TreeViewProvider implements vscode.TreeDataProvider<FileTreeItem> {
         const fullPath = path.join(dirPath, entry.name);
         const relativePath = path.relative(root, fullPath).replace(/\\/g, '/');
 
-        if (this.shouldExclude(relativePath, entry.name)) {
+        if (this.shouldExclude(relativePath, entry.name, entry.isDirectory())) {
           continue;
         }
 
         if (entry.isDirectory()) {
-          const subFiles = await this.getAllFilesRecursive(fullPath);
+          const subFiles = await this.getAllFilesRecursive(fullPath, depth + 1);
           files.push(...subFiles);
         } else {
           files.push(fullPath);
@@ -561,6 +491,187 @@ export class TreeViewProvider implements vscode.TreeDataProvider<FileTreeItem> {
     }
 
     return files;
+  }
+
+  private createProjectContext(root: string, files: FileContext[]): ProjectContext {
+    return {
+      files,
+      structure: null,
+      metadata: {
+        rootPath: root,
+        totalFiles: files.length,
+        totalSize: files.reduce((sum, file) => sum + file.stats.size, 0),
+        tokenCount: 0,
+        timestamp: Date.now(),
+      },
+    };
+  }
+
+  private createBinaryFileContext(fullPath: string, relativePath: string, size: number): FileContext {
+    return {
+      path: fullPath,
+      content: '[Binary file - content not included]',
+      language: 'plaintext',
+      relativePath,
+      stats: { size, isDirectory: false },
+      isBinary: true,
+      binaryCategory: getBinaryFileCategory(fullPath),
+    };
+  }
+
+  private createOversizedFileContext(fullPath: string, relativePath: string, size: number): FileContext {
+    return {
+      path: fullPath,
+      content: [
+        '[File omitted - exceeds maximum file size]',
+        `Path: ${relativePath}`,
+        `Size: ${this.formatSize(size)}`,
+        `Configured limit: ${this.formatSize(this.maxFileSize)}`,
+      ].join('\n'),
+      language: 'plaintext',
+      relativePath,
+      stats: { size, isDirectory: false },
+    };
+  }
+
+  private async createFileContextFromPath(fullPath: string, relativePath: string, stat: { size: number }): Promise<FileContext> {
+    if (isBinaryFile(fullPath)) {
+      return this.createBinaryFileContext(fullPath, relativePath, stat.size);
+    }
+
+    if (this.maxFileSize > 0 && stat.size > this.maxFileSize) {
+      return this.createOversizedFileContext(fullPath, relativePath, stat.size);
+    }
+
+    const content = await fs.readFile(fullPath, 'utf-8');
+    return {
+      path: fullPath,
+      content,
+      language: detectLanguage(fullPath),
+      relativePath,
+      stats: { size: stat.size, isDirectory: false },
+    };
+  }
+
+  private async collectFileContexts(
+    relativePaths: Iterable<string>,
+    options: ContentCollectionOptions
+  ): Promise<CollectedContextResult> {
+    await this.ensureSettingsLoaded();
+
+    const root = this.contextManager.getWorkspaceRoot();
+    if (!root) {
+      return {
+        context: null,
+        binaryFilesInfo: [],
+        directoriesSkipped: [],
+        oversizedFiles: [],
+        skippedByTotalLimit: [],
+      };
+    }
+
+    const filesToCopy: FileContext[] = [];
+    const directoriesSkipped: string[] = [];
+    const binaryFilesInfo: { path: string; category: string; size: number }[] = [];
+    const oversizedFiles: { path: string; size: number }[] = [];
+    const skippedByTotalLimit: { path: string; size: number }[] = [];
+    let totalReadableBytes = 0;
+
+    for (const relPath of relativePaths) {
+      const fullPath = path.join(root, relPath);
+
+      try {
+        const stat = await fs.stat(fullPath);
+        if (stat.isDirectory()) {
+          directoriesSkipped.push(relPath);
+          continue;
+        }
+
+        if (
+          options.enforceTotalSize
+          && options.totalSizeLimit > 0
+          && !isBinaryFile(fullPath)
+          && (this.maxFileSize === 0 || stat.size <= this.maxFileSize)
+          && totalReadableBytes + stat.size > options.totalSizeLimit
+        ) {
+          skippedByTotalLimit.push({ path: relPath, size: stat.size });
+          continue;
+        }
+
+        const fileContext = await this.createFileContextFromPath(fullPath, relPath, stat);
+        filesToCopy.push(fileContext);
+
+        if (fileContext.isBinary) {
+          binaryFilesInfo.push({
+            path: relPath,
+            category: fileContext.binaryCategory || 'Binary',
+            size: stat.size,
+          });
+        } else if (this.maxFileSize > 0 && stat.size > this.maxFileSize) {
+          oversizedFiles.push({ path: relPath, size: stat.size });
+        } else {
+          totalReadableBytes += stat.size;
+        }
+      } catch (error) {
+        console.error(`[LLM Context Copy] Error reading file ${relPath}:`, error);
+      }
+    }
+
+    return {
+      context: filesToCopy.length > 0 ? this.createProjectContext(root, filesToCopy) : null,
+      binaryFilesInfo,
+      directoriesSkipped,
+      oversizedFiles,
+      skippedByTotalLimit,
+    };
+  }
+
+  private async collectAbsoluteFileContexts(
+    filePaths: Iterable<string>,
+    enforceTotalSize = false
+  ): Promise<FileContext[]> {
+    const root = this.contextManager.getWorkspaceRoot();
+    if (!root) {
+      return [];
+    }
+
+    const result = await this.collectFileContexts(
+      Array.from(filePaths, (filePath) => path.relative(root, filePath).replace(/\\/g, '/')),
+      {
+        enforceTotalSize,
+        totalSizeLimit: this.maxTotalSize,
+      }
+    );
+
+    return result.context?.files ?? [];
+  }
+
+  private formatCollectionWarnings(result: CollectedContextResult): string[] {
+    const warnings: string[] = [];
+
+    if (result.oversizedFiles.length > 0) {
+      warnings.push(
+        `${result.oversizedFiles.length} file(s) exceeded ${this.formatSize(this.maxFileSize)} and were added as path-only placeholders.`
+      );
+    }
+
+    if (result.skippedByTotalLimit.length > 0) {
+      warnings.push(
+        `${result.skippedByTotalLimit.length} file(s) were skipped because selected readable content exceeded ${this.formatSize(this.maxTotalSize)}.`
+      );
+    }
+
+    return warnings;
+  }
+
+  private formatSize(bytes: number): string {
+    if (bytes < 1024) {
+      return `${bytes} B`;
+    }
+    if (bytes < 1024 * 1024) {
+      return `${(bytes / 1024).toFixed(1)} KB`;
+    }
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   }
 
   async copySelectedItems(): Promise<void> {
@@ -575,49 +686,19 @@ export class TreeViewProvider implements vscode.TreeDataProvider<FileTreeItem> {
       return;
     }
 
-    const filesToCopy: any[] = [];
-    const directoriesSkipped: string[] = [];
-    const binaryFilesInfo: { path: string; category: string; size: number }[] = [];
+    const result = await this.collectFileContexts(this.checkedItems, {
+      enforceTotalSize: true,
+      totalSizeLimit: this.maxTotalSize,
+    });
 
-    for (const relPath of this.checkedItems) {
-      const fullPath = path.join(root, relPath);
-      try {
-        const stat = await fs.stat(fullPath);
-        if (stat.isFile()) {
-          if (isBinaryFile(fullPath)) {
-            const category = getBinaryFileCategory(fullPath);
-            binaryFilesInfo.push({ path: relPath, category, size: stat.size });
-            filesToCopy.push({
-              path: fullPath,
-              content: `[Binary file - content not included]`,
-              language: 'plaintext',
-              relativePath: relPath,
-              stats: { size: stat.size, isDirectory: false },
-              isBinary: true,
-              binaryCategory: category,
-            });
-          } else {
-            const content = await fs.readFile(fullPath, 'utf-8');
-            filesToCopy.push({
-              path: fullPath,
-              content,
-              language: detectLanguage(fullPath),
-              relativePath: relPath,
-              stats: { size: stat.size, isDirectory: false },
-            });
-          }
-        } else if (stat.isDirectory()) {
-          directoriesSkipped.push(relPath);
-        }
-      } catch (error) {
-        console.error(`[LLM Context Copy] Error reading file ${relPath}:`, error);
-      }
-    }
-
-    if (filesToCopy.length === 0) {
-      if (directoriesSkipped.length > 0) {
+    if (!result.context) {
+      if (result.directoriesSkipped.length > 0) {
         vscode.window.showWarningMessage(
-          `Only directories were selected (${directoriesSkipped.length}). Please expand folders and select individual files, or use "Select All" to include all files.`
+          `Only directories were selected (${result.directoriesSkipped.length}). Please expand folders and select individual files, or use "Select All" to include all files.`
+        );
+      } else if (result.skippedByTotalLimit.length > 0) {
+        vscode.window.showWarningMessage(
+          `Selection exceeds the safe readable content limit of ${this.formatSize(this.maxTotalSize)}. Reduce the selection or enable compression before copying.`
         );
       } else {
         vscode.window.showWarningMessage('No files selected. Please select files from the tree view.');
@@ -625,39 +706,32 @@ export class TreeViewProvider implements vscode.TreeDataProvider<FileTreeItem> {
       return;
     }
 
-    const context: ProjectContext = {
-      files: filesToCopy,
-      structure: null,
-      metadata: {
-        rootPath: root,
-        totalFiles: filesToCopy.length,
-        totalSize: filesToCopy.reduce((s: number, f: any) => s + f.stats.size, 0),
-        tokenCount: 0,
-        timestamp: Date.now(),
-      },
-    };
-
     const strategies = Array.from(this.contextManager.getActiveStrategies());
-    await this.copyService.copyToClipboard(context, strategies);
+    await this.copyService.copyToClipboard(result.context, strategies);
 
-    if (binaryFilesInfo.length > 0) {
-      const binarySummary = binaryFilesInfo.map(f => `${f.path} (${f.category})`).join(', ');
+    if (result.binaryFilesInfo.length > 0) {
+      const binarySummary = result.binaryFilesInfo.map(f => `${f.path} (${f.category})`).join(', ');
       vscode.window.showInformationMessage(
-        `✓ Copied ${filesToCopy.length} files. ${binaryFilesInfo.length} binary file(s) included as path reference only: ${binarySummary}`
+        `✓ Copied ${result.context.files.length} files. ${result.binaryFilesInfo.length} binary file(s) included as path reference only: ${binarySummary}`
       );
+    }
+
+    const warnings = this.formatCollectionWarnings(result);
+    if (warnings.length > 0) {
+      vscode.window.showWarningMessage(warnings.join(' '));
     }
 
     if (this.sessionMemory) {
       const sessionEntry: SessionMemoryEntry = {
         id: Date.now().toString(),
         timestamp: Date.now(),
-        files: filesToCopy.map(f => ({
+        files: result.context.files.map(f => ({
           path: f.relativePath,
           content: f.content,
           lastModified: Date.now(),
           isModified: false,
         })),
-        totalTokens: context.metadata.tokenCount,
+        totalTokens: result.context.metadata.tokenCount,
         compressionStrategies: strategies,
         outputFormat: this.contextManager.getOutputFormat(),
       };
@@ -718,47 +792,19 @@ export class TreeViewProvider implements vscode.TreeDataProvider<FileTreeItem> {
       return;
     }
 
-    const filesToCopy: FileContext[] = [];
-    const directoriesSkipped: string[] = [];
+    const result = await this.collectFileContexts(this.checkedItems, {
+      enforceTotalSize: true,
+      totalSizeLimit: this.maxTotalSize,
+    });
 
-    for (const relPath of this.checkedItems) {
-      const fullPath = path.join(root, relPath);
-      try {
-        const stat = await fs.stat(fullPath);
-        if (stat.isFile()) {
-          if (isBinaryFile(fullPath)) {
-            const category = getBinaryFileCategory(fullPath);
-            filesToCopy.push({
-              path: fullPath,
-              content: `[Binary file - content not included]`,
-              language: 'plaintext',
-              relativePath: relPath,
-              stats: { size: stat.size, isDirectory: false },
-              isBinary: true,
-              binaryCategory: category,
-            });
-          } else {
-            const content = await fs.readFile(fullPath, 'utf-8');
-            filesToCopy.push({
-              path: fullPath,
-              content,
-              language: detectLanguage(fullPath),
-              relativePath: relPath,
-              stats: { size: stat.size, isDirectory: false },
-            });
-          }
-        } else if (stat.isDirectory()) {
-          directoriesSkipped.push(relPath);
-        }
-      } catch (error) {
-        console.error(`[LLM Context Copy] Error reading file ${relPath}:`, error);
-      }
-    }
-
-    if (filesToCopy.length === 0) {
-      if (directoriesSkipped.length > 0) {
+    if (!result.context) {
+      if (result.directoriesSkipped.length > 0) {
         vscode.window.showWarningMessage(
-          `Only directories were selected (${directoriesSkipped.length}). Please expand folders and select individual files, or use "Select All" to include all files.`
+          `Only directories were selected (${result.directoriesSkipped.length}). Please expand folders and select individual files, or use "Select All" to include all files.`
+        );
+      } else if (result.skippedByTotalLimit.length > 0) {
+        vscode.window.showWarningMessage(
+          `Preview exceeds the safe readable content limit of ${this.formatSize(this.maxTotalSize)}. Reduce the selection before previewing.`
         );
       } else {
         vscode.window.showWarningMessage('No files selected. Please select files from the tree view.');
@@ -766,23 +812,18 @@ export class TreeViewProvider implements vscode.TreeDataProvider<FileTreeItem> {
       return;
     }
 
-    let context: ProjectContext = {
-      files: filesToCopy,
-      structure: null,
-      metadata: {
-        rootPath: root,
-        totalFiles: filesToCopy.length,
-        totalSize: filesToCopy.reduce((s, f) => s + f.stats.size, 0),
-        tokenCount: 0,
-        timestamp: Date.now(),
-      },
-    };
+    let context = result.context;
 
     const activeStrategies = Array.from(this.contextManager.getActiveStrategies());
     if (activeStrategies.length > 0) {
       const compressionEngine = this.contextManager.getCompressionEngine() as CompressionEngine;
       const result = await compressionEngine.compressWithStrategies(context, activeStrategies);
       context = result.context;
+    }
+
+    const warnings = this.formatCollectionWarnings(result);
+    if (warnings.length > 0) {
+      vscode.window.showWarningMessage(warnings.join(' '));
     }
 
     const preview = new PreviewPanel(this.extensionContext, this.contextManager.getTokenCounter());
@@ -820,36 +861,7 @@ export class TreeViewProvider implements vscode.TreeDataProvider<FileTreeItem> {
     this.tokenBudgetManager.updateConfig({ maxTokens: targetTokens });
 
     const allFiles = await this.getAllProjectFiles(root);
-    const filesWithContent: FileContext[] = [];
-
-    for (const filePath of allFiles) {
-      try {
-        const stat = await fs.stat(filePath);
-        const relPath = path.relative(root, filePath).replace(/\\/g, '/');
-        
-        if (isBinaryFile(filePath)) {
-          const category = getBinaryFileCategory(filePath);
-          filesWithContent.push({
-            path: filePath,
-            content: `[Binary file - content not included]`,
-            language: 'plaintext',
-            relativePath: relPath,
-            stats: { size: stat.size, isDirectory: false },
-            isBinary: true,
-            binaryCategory: category,
-          });
-        } else {
-          const content = await fs.readFile(filePath, 'utf-8');
-          filesWithContent.push({
-            path: filePath,
-            content,
-            language: detectLanguage(filePath),
-            relativePath: relPath,
-            stats: { size: Buffer.byteLength(content, 'utf-8'), isDirectory: false },
-          });
-        }
-      } catch { /* skip */ }
-    }
+    const filesWithContent = await this.collectAbsoluteFileContexts(allFiles);
 
     const result = await this.tokenBudgetManager.calculateOptimalSelection(
       filesWithContent,
@@ -875,6 +887,8 @@ export class TreeViewProvider implements vscode.TreeDataProvider<FileTreeItem> {
   }
 
   async getAllProjectFiles(root: string): Promise<string[]> {
+    await this.ensureSettingsLoaded();
+
     const files: string[] = [];
     
     try {
@@ -884,12 +898,12 @@ export class TreeViewProvider implements vscode.TreeDataProvider<FileTreeItem> {
         const fullPath = path.join(root, entry.name);
         const relativePath = entry.name;
         
-        if (this.shouldExclude(relativePath, entry.name)) {
+        if (this.shouldExclude(relativePath, entry.name, entry.isDirectory())) {
           continue;
         }
         
         if (entry.isDirectory()) {
-          files.push(...await this.getAllFilesRecursive(fullPath));
+          files.push(...await this.getAllFilesRecursive(fullPath, 1));
         } else {
           files.push(fullPath);
         }
@@ -939,51 +953,12 @@ export class TreeViewProvider implements vscode.TreeDataProvider<FileTreeItem> {
     const root = this.contextManager.getWorkspaceRoot();
     if (!root) { return null; }
 
-    const filesToCopy: FileContext[] = [];
+    const result = await this.collectFileContexts(this.checkedItems, {
+      enforceTotalSize: true,
+      totalSizeLimit: this.maxTotalSize,
+    });
 
-    for (const relPath of this.checkedItems) {
-      const fullPath = path.join(root, relPath);
-      try {
-        const stat = await fs.stat(fullPath);
-        if (stat.isFile()) {
-          if (isBinaryFile(fullPath)) {
-            const category = getBinaryFileCategory(fullPath);
-            filesToCopy.push({
-              path: fullPath,
-              content: `[Binary file - content not included]`,
-              language: 'plaintext',
-              relativePath: relPath,
-              stats: { size: stat.size, isDirectory: false },
-              isBinary: true,
-              binaryCategory: category,
-            });
-          } else {
-            const content = await fs.readFile(fullPath, 'utf-8');
-            filesToCopy.push({
-              path: fullPath,
-              content,
-              language: detectLanguage(fullPath),
-              relativePath: relPath,
-              stats: { size: stat.size, isDirectory: false },
-            });
-          }
-        }
-      } catch { /* skip */ }
-    }
-
-    if (filesToCopy.length === 0) { return null; }
-
-    return {
-      files: filesToCopy,
-      structure: null,
-      metadata: {
-        rootPath: root,
-        totalFiles: filesToCopy.length,
-        totalSize: filesToCopy.reduce((s, f) => s + f.stats.size, 0),
-        tokenCount: 0,
-        timestamp: Date.now(),
-      },
-    };
+    return result.context;
   }
 
   setSemanticCompressionEnabled(enabled: boolean): void {
@@ -995,36 +970,7 @@ export class TreeViewProvider implements vscode.TreeDataProvider<FileTreeItem> {
     if (!root) { return; }
 
     const allFiles = await this.getAllProjectFiles(root);
-    const filesWithContent: FileContext[] = [];
-
-    for (const filePath of allFiles) {
-      try {
-        const stat = await fs.stat(filePath);
-        const relPath = path.relative(root, filePath).replace(/\\/g, '/');
-        
-        if (isBinaryFile(filePath)) {
-          const category = getBinaryFileCategory(filePath);
-          filesWithContent.push({
-            path: filePath,
-            content: `[Binary file - content not included]`,
-            language: 'plaintext',
-            relativePath: relPath,
-            stats: { size: stat.size, isDirectory: false },
-            isBinary: true,
-            binaryCategory: category,
-          });
-        } else {
-          const content = await fs.readFile(filePath, 'utf-8');
-          filesWithContent.push({
-            path: filePath,
-            content,
-            language: detectLanguage(filePath),
-            relativePath: relPath,
-            stats: { size: Buffer.byteLength(content, 'utf-8'), isDirectory: false },
-          });
-        }
-      } catch { /* skip */ }
-    }
+    const filesWithContent = await this.collectAbsoluteFileContexts(allFiles);
 
     const { SmartFileSorter } = await import('../intelligence/SmartFileSorter.js');
     const sorter = new SmartFileSorter(root);
@@ -1062,36 +1008,7 @@ export class TreeViewProvider implements vscode.TreeDataProvider<FileTreeItem> {
     };
 
     const allFiles = await this.getAllProjectFiles(root);
-    const filesWithContent: FileContext[] = [];
-
-    for (const filePath of allFiles) {
-      try {
-        const stat = await fs.stat(filePath);
-        const relPath = path.relative(root, filePath).replace(/\\/g, '/');
-        
-        if (isBinaryFile(filePath)) {
-          const category = getBinaryFileCategory(filePath);
-          filesWithContent.push({
-            path: filePath,
-            content: `[Binary file - content not included]`,
-            language: 'plaintext',
-            relativePath: relPath,
-            stats: { size: stat.size, isDirectory: false },
-            isBinary: true,
-            binaryCategory: category,
-          });
-        } else {
-          const content = await fs.readFile(filePath, 'utf-8');
-          filesWithContent.push({
-            path: filePath,
-            content,
-            language: detectLanguage(filePath),
-            relativePath: relPath,
-            stats: { size: Buffer.byteLength(content, 'utf-8'), isDirectory: false },
-          });
-        }
-      } catch { /* skip */ }
-    }
+    const filesWithContent = await this.collectAbsoluteFileContexts(allFiles);
 
     const { ContextRelevanceScorer } = await import('../intelligence/ContextRelevanceScorer.js');
     const scorer = new ContextRelevanceScorer({ weights });
@@ -1138,7 +1055,7 @@ export class FileTreeItem extends vscode.TreeItem {
 
     if (itemData.tokenCount !== undefined) {
       this.description = this.formatNumber(itemData.tokenCount);
-    } else {
+    } else if (itemData.size > 0) {
       this.description = this.formatNumber(itemData.size);
     }
 

@@ -2,7 +2,7 @@
   "name": "llm-context-copy",
   "displayName": "LLM Context Copy",
   "description": "Smart context copying tool for LLMs with custom file tree UI. Select files with checkboxes and copy to clipboard with token optimization.",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "publisher": "bitfarer",
   "engines": {
     "vscode": "^1.96.0"
@@ -320,6 +320,11 @@
           "type": "number",
           "default": 2097152,
           "description": "Maximum file size in bytes to include (default: 2MB)."
+        },
+        "llm-context-copy.maxTotalSize": {
+          "type": "number",
+          "default": 8388608,
+          "description": "Maximum total readable text size in bytes to assemble for copy/preview operations (default: 8MB)."
         },
         "llm-context-copy.maxDepth": {
           "type": "number",

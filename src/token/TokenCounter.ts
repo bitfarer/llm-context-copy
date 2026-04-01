@@ -12,6 +12,7 @@ export interface TokenCountResult {
 
 export interface ITokenCounter {
   countTokens(text: string): number;
+  estimateTokensFromBytes(byteLength: number): number;
   countFileTokens(file: FileContext): number;
   countProjectTokens(context: ProjectContext): TokenCountResult;
 }
@@ -28,6 +29,13 @@ export class TokenCounter implements ITokenCounter {
       return 0;
     }
     const byteLength = Buffer.byteLength(text, 'utf-8');
+    return this.estimateTokensFromBytes(byteLength);
+  }
+
+  estimateTokensFromBytes(byteLength: number): number {
+    if (byteLength <= 0) {
+      return 0;
+    }
     return Math.ceil(byteLength / this.charsPerToken);
   }
 

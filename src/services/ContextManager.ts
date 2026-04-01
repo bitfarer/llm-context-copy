@@ -14,6 +14,8 @@ import * as path from 'path';
 import * as fs from 'fs/promises';
 import { TokenCounterFactory, ITokenCounter } from '../token/TokenCounter';
 import { CompressionEngine, CompressionEngineBuilder } from '../compression/CompressionEngine';
+import { isBinaryFile } from '../utils/FileUtils';
+import { IgnoreMatcher } from '../utils/IgnoreMatcher';
 import {
   RemoveEmptyLinesStrategy,
   RemoveCommentsStrategy,
@@ -40,6 +42,10 @@ export class ContextManager {
   private outputFormat: 'markdown' | 'json' | 'plain' | 'toon' = 'markdown';
 
   private tokenCache: Map<string, TokenCacheEntry> = new Map();
+  private ignoreMatcher: IgnoreMatcher = IgnoreMatcher.empty();
+  private settingsReady: Promise<void> = Promise.resolve();
+  private maxFileSize = 2 * 1024 * 1024;
+  private maxDepth = 10;
 
   constructor(private extensionContext: vscode.ExtensionContext) {
     this.tokenCounter = TokenCounterFactory.createDefault();
@@ -54,14 +60,17 @@ export class ContextManager {
 
     this.updateWorkspaceRoot();
     this.loadSettings();
+    this.settingsReady = this.reloadRuntimeSettings();
 
     extensionContext.subscriptions.push(
       vscode.workspace.onDidChangeWorkspaceFolders(() => {
         this.updateWorkspaceRoot();
+        this.settingsReady = this.reloadRuntimeSettings();
         this.refresh();
       }),
       vscode.workspace.onDidChangeConfiguration((e) => {
         if (e.affectsConfiguration('llm-context-copy')) {
+          this.settingsReady = this.reloadRuntimeSettings();
           this.refresh();
         }
       })
@@ -92,6 +101,14 @@ export class ContextManager {
   public refresh(): void {
     this.tokenCache.clear();
     this._onDidChange.fire();
+  }
+
+  private async reloadRuntimeSettings(): Promise<void> {
+    const config = vscode.workspace.getConfiguration('llm-context-copy');
+    this.maxFileSize = Math.max(0, config.get<number>('maxFileSize', 2 * 1024 * 1024));
+    this.maxDepth = Math.max(1, config.get<number>('maxDepth', 10));
+    const excludePatterns = config.get<string[]>('excludePatterns', []);
+    this.ignoreMatcher = await IgnoreMatcher.create(this.workspaceRoot, excludePatterns);
   }
 
   /**
@@ -163,6 +180,8 @@ export class ContextManager {
    * Uses caching to avoid redundant I/O operations
    */
   public async getStatsForPath(relativePath: string, isDirectory: boolean): Promise<{ size: number; tokens: number }> {
+    await this.settingsReady;
+
     if (!this.workspaceRoot) {
       return { size: 0, tokens: 0 };
     }
@@ -203,6 +222,28 @@ export class ContextManager {
         return { size: cached.size, tokens: cached.tokens };
       }
 
+      if (isBinaryFile(fullPath)) {
+        this.tokenCache.set(fullPath, {
+          size: stat.size,
+          mtime,
+          tokens: 0,
+        });
+
+        return { size: stat.size, tokens: 0 };
+      }
+
+      if (this.maxFileSize > 0 && stat.size > this.maxFileSize) {
+        const estimatedTokens = this.tokenCounter.estimateTokensFromBytes(this.maxFileSize);
+
+        this.tokenCache.set(fullPath, {
+          size: stat.size,
+          mtime,
+          tokens: estimatedTokens,
+        });
+
+        return { size: stat.size, tokens: estimatedTokens };
+      }
+
       const content = await fs.readFile(fullPath, 'utf-8');
       const rawTokens = this.tokenCounter.countTokens(content);
 
@@ -222,18 +263,28 @@ export class ContextManager {
    * Recursively collects all files in a directory
    * Excludes node_modules and hidden files
    */
-  private async getAllFilesRecursive(dirPath: string): Promise<string[]> {
+  private async getAllFilesRecursive(dirPath: string, depth = 0): Promise<string[]> {
     const files: string[] = [];
+    if (depth > this.maxDepth) {
+      return files;
+    }
+
     try {
       const entries = await fs.readdir(dirPath, { withFileTypes: true });
       for (const entry of entries) {
         const fullPath = path.join(dirPath, entry.name);
-        if (entry.name.startsWith('.') || entry.name === 'node_modules') {
+        const relativePath = path.relative(this.workspaceRoot, fullPath).replace(/\\/g, '/');
+
+        if (entry.name.startsWith('.') && entry.name !== '.gitignore') {
+          continue;
+        }
+
+        if (this.ignoreMatcher.ignores(relativePath, entry.isDirectory())) {
           continue;
         }
 
         if (entry.isDirectory()) {
-          files.push(...await this.getAllFilesRecursive(fullPath));
+          files.push(...await this.getAllFilesRecursive(fullPath, depth + 1));
         } else {
           files.push(fullPath);
         }
