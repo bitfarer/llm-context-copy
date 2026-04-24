@@ -105,7 +105,7 @@ Supports 4 output formats:
 
 ### Markdown Format Example
 
-```markdown
+````markdown
 # Project Context
 
 ## Directory Structure
@@ -148,7 +148,7 @@ export const formatDate = (date: Date) => {
   return date.toLocaleDateString();
 };
 ```
-```
+````
 
 ## Configuration
 
@@ -216,6 +216,12 @@ Search for `llm-context-copy` in VS Code settings to configure:
 - 🧠 Smart recommendation system
 - 📦 Multiple output format support
 - 💾 Persistent settings storage
+
+## Sponsor
+
+If this extension has been helpful to you, consider buying me a coffee ☕
+
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20Me-F16061?style=for-the-badge&logo=ko-fi)](https://ko-fi.com/bitfarer)
 
 ## License
 
